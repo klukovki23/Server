@@ -1,36 +1,109 @@
-package com.viikko4;
+package com.viikko5;
 
-import java.util.Hashtable;
-import java.util.Map;
-
+import org.apache.commons.codec.digest.Crypt;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import com.sun.net.httpserver.BasicAuthenticator;
+
+
 
 public class UserAuthenticator extends BasicAuthenticator {
 
-    private Map<String,User> users = new Hashtable <>();
+    private final MessageDatabase database;
+    
 
-    public UserAuthenticator() {
+    public UserAuthenticator(MessageDatabase database) {
         super("datarecord"); 
+        this.database = database;
         
-        users.put("username", new User("username", "password", "user.email@for-contacting.com")); 
+        
     }
 
     @Override
     public boolean checkCredentials(String username, String password) {
 
-        User user = users.get(username);
-        
-        return user != null && user.getPassword().equals(password);
-    }
-    
-
-
-    public synchronized boolean addUser(String username, String password, String email) {
-        if (users.containsKey(username)) {
+        String storedHashedPassword = getStoredPassword(username);
+        if (storedHashedPassword == null) {
             return false;
         }
-        users.put(username, new User(username, password, email));
-        return true;
+        return storedHashedPassword.equals(Crypt.crypt(password, storedHashedPassword));
+    }       
+
+    private String getStoredPassword(String username) {
+
+        Connection conn = null;
+        PreparedStatement stmt = null;
+        ResultSet rs = null;
+        try {
+            conn = database.getConnection();
+            String query = "SELECT password FROM users WHERE username = ?;";
+            stmt = conn.prepareStatement(query);
+            stmt.setString(1, username);
+            rs = stmt.executeQuery();
+                
+            if (rs.next()) {
+                    return rs.getString("password");  
+                }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return null;
     }
-    
+
+    public synchronized boolean addUser(String username, String password, String email, String nickname) {
+        try {
+            
+            return database.registerUser(username, password, email, nickname);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    public synchronized String getUserNickname(String username) {
+        
+        try {
+            return getStoredNickname(username);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private String getStoredNickname(String username) throws SQLException {
+        Connection conn = null;
+        PreparedStatement stmt = null;
+        ResultSet rs = null;
+        try {
+            conn = database.getConnection();
+            String query = "SELECT userNickname FROM users WHERE username = ?;";
+            stmt = conn.prepareStatement(query);
+            stmt.setString(1, username);
+            rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getString("userNickname");
+            }
+        } finally {
+            closeResources(stmt, rs);
+        }
+        return null;
+    }
+
+    private void closeResources(PreparedStatement stmt, ResultSet rs) {
+        try {
+            if (rs != null) {
+                rs.close();
+            }
+            if (stmt != null) {
+                stmt.close();
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
 }
+
+
