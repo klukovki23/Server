@@ -1,4 +1,4 @@
-package com.viikko4;
+package com.viikko5;
 
 import com.sun.net.httpserver.*;
 import java.io.*;
@@ -7,6 +7,7 @@ import java.security.KeyStore;
 import java.sql.*;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -17,15 +18,20 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONException;
 
+
+
 import java.net.InetSocketAddress;
 
 public class Server implements HttpHandler {
-
+   
+    private Authenticator authenticator;
     private static MessageDatabase database;
+
+    private static final String DB_PATH = "database.db"; 
 
     static {
         try {
-            database = MessageDatabase.getInstance("messages.db");
+            database = MessageDatabase.getInstance(DB_PATH);
         } catch (SQLException e) {
             e.printStackTrace();
         }
@@ -77,9 +83,13 @@ public class Server implements HttpHandler {
     }
 
     private void handlePOSTRequest(HttpExchange exchange) throws IOException, SQLException {
+
+
         String text = new BufferedReader(new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8))
                 .lines()
                 .collect(Collectors.joining("\n"));
+        System.out.println("Received JSON: " + text);
+        
         try {
             JSONObject json = new JSONObject(text);
             String recordIdentifier = json.getString("recordIdentifier");
@@ -87,9 +97,32 @@ public class Server implements HttpHandler {
             String recordPayload = json.getString("recordPayload");
             String recordRightAscension = json.getString("recordRightAscension");
             String recordDeclination = json.getString("recordDeclination");
-            long recordTimeReceived = System.currentTimeMillis();
+            
+            String recordOwner = null;
 
-            database.storeMessage(recordIdentifier, recordDescription, recordPayload, recordRightAscension, recordDeclination, recordTimeReceived);
+            if (json.has("recordOwner")) {
+             recordOwner = json.getString("recordOwner");
+        } else {
+            
+             
+             String username = exchange.getPrincipal().getUsername();  
+             
+             database.getConnection();
+
+             recordOwner = database.getNicknameForUser(username);
+             if (recordOwner == null) {
+                 recordOwner = "Unknown"; 
+             }
+         }
+            
+            long recordTimeReceived = System.currentTimeMillis();
+            JSONArray observatory = json.optJSONArray("observatory");
+        
+            database.storeMessage(recordIdentifier, recordDescription, recordPayload, recordRightAscension, recordDeclination, recordOwner, observatory, recordTimeReceived, exchange.getPrincipal().getUsername());
+            if (observatory != null) {
+                
+                database.storeObservatory(observatory);
+            }
             exchange.sendResponseHeaders(200, -1);
         } catch (JSONException e) {
             String response = "Invalid JSON: " + e.getMessage();
@@ -99,10 +132,11 @@ public class Server implements HttpHandler {
             }
         }
     }
+    
 
     private void handleGETRequest(HttpExchange exchange) throws IOException {
         String query = "SELECT recordIdentifier, recordDescription, recordPayload, recordRightAscension, " +
-                "recordDeclination, originalPostingTime FROM messages ORDER BY originalPostingTime DESC;";
+                "recordDeclination, originalPostingTime, recordOwner, observatory FROM messages ORDER BY originalPostingTime DESC;";
         try (Statement stmt = database.getConnection().createStatement();
              ResultSet rs = stmt.executeQuery(query)) {
             if (!rs.isBeforeFirst()) {
@@ -117,8 +151,28 @@ public class Server implements HttpHandler {
                 messageJson.put("recordPayload", rs.getString("recordPayload"));
                 messageJson.put("recordRightAscension", rs.getString("recordRightAscension"));
                 messageJson.put("recordDeclination", rs.getString("recordDeclination"));
+
                 messageJson.put("recordTimeReceived", Instant.ofEpochMilli(rs.getLong("originalPostingTime")).atZone(ZoneOffset.UTC).toString());
                 responseMessages.put(messageJson);
+
+                String recordOwner = rs.getString("recordOwner");
+                if (recordOwner == null || recordOwner.isEmpty()) {
+
+                    database.getConnection();
+                
+                    String username = exchange.getPrincipal().getUsername();  
+                    recordOwner = database.getNicknameForUser(username);
+                    if (recordOwner == null) {
+                        recordOwner = "Unknown";
+                    }
+                }
+                messageJson.put("recordOwner", recordOwner);
+
+                String observatory = rs.getString("observatory");
+                if (observatory != null) {
+                    messageJson.put("observatory", new JSONArray(observatory));  
+                }
+
             }
             byte[] bytes = responseMessages.toString().getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -135,11 +189,12 @@ public class Server implements HttpHandler {
         }
     }
     public static void main(String[] args) throws Exception {
+       
         String keystorePath = args[0];
         String keystorePassword = args[1];
         try {
             HttpsServer server = HttpsServer.create(new InetSocketAddress(8001), 0);
-            UserAuthenticator authenticator = new UserAuthenticator();
+            UserAuthenticator authenticator = new UserAuthenticator(database);
             SSLContext sslContext = myServerSSLContext(keystorePath, keystorePassword);
             server.setHttpsConfigurator(new HttpsConfigurator(sslContext) {
                 public void configure(HttpsParameters params) {
@@ -151,10 +206,13 @@ public class Server implements HttpHandler {
             HttpContext context = server.createContext("/datarecord", new Server());
             context.setAuthenticator(authenticator);
             server.createContext("/registration", new RegistrationHandler(authenticator));
-            server.setExecutor(null);
+            server.setExecutor(Executors.newCachedThreadPool());
             server.start();
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 }
+
+
+
